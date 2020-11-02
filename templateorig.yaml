@@ -240,7 +240,37 @@ Resources:
   EntitlementSQSQueue:
     Type: AWS::SQS::Queue
     Condition: CreateEntitlementLogic
- 
+
+  EntitlementSQSHandler:
+    Type: AWS::Serverless::Function
+    Condition: CreateEntitlementLogic
+    Properties:
+      CodeUri: src
+      Handler: entitlement-sqs.handler
+      Runtime: nodejs12.x
+      Environment:
+        Variables:
+          NewSubscribersTableName: !Ref NewSubscribersTableName
+      Policies:
+        - DynamoDBWritePolicy:
+            TableName: !Ref NewSubscribersTableName
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt SQSMeteringRecrods.Arn
+        - Statement:
+            - Sid: AWSMarketplaceEntitlements
+              Effect: Allow
+              Action:
+                - aws-marketplace:GetEntitlements
+              Resource: "*"
+      Events:
+        MySQSEvent:
+          Type: SNS
+          Properties:
+            Topic: !Ref EntitlementSNSTopic
+            SqsSubscription:
+              BatchSize: 1
+              QueueArn: !GetAtt EntitlementSQSQueue.Arn
+              QueueUrl: !Ref EntitlementSQSQueue
 
   SubscriptionSQSHandler:
     Type: AWS::Serverless::Function
@@ -301,4 +331,63 @@ Resources:
             BatchSize: 1
             StartingPosition: TRIM_HORIZON
 
-  
+  Hourly:
+    Type: AWS::Serverless::Function
+    Condition: CreateSubscriptionLogic
+    Properties:
+      CodeUri: src
+      Handler: metering-hourly-job.job
+      Runtime: nodejs12.x
+      Environment:
+        Variables:
+          SQSMeteringRecrodsUrl: !Ref SQSMeteringRecrods
+          AWSMarketplaceMeteringRecordsTableName: !Ref AWSMarketplaceMeteringRecordsTableName
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref AWSMarketplaceMeteringRecordsTableName
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt SQSMeteringRecrods.QueueName
+      Events:
+        CWSchedule:
+          Type: Schedule
+          Properties:
+            Schedule: "rate(1 hour)"
+            Name: !Join [ "-", [MeteringSchedule,  !Ref AWS::StackName]]
+            Description: SaaS Metering
+            Enabled: TRUE
+
+  SQSMeteringRecrods:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Join [ "-", [!Ref AWS::StackName, SQSMeteringRecrods.fifo]]
+      ContentBasedDeduplication: true
+      FifoQueue: true
+      MessageRetentionPeriod: 3000
+    Condition: CreateSubscriptionLogic
+
+  MeteringSQSHandler:
+    Type: AWS::Serverless::Function
+    Condition: CreateSubscriptionLogic
+    Properties:
+      CodeUri: src
+      Handler: metering-sqs.handler
+      Runtime: nodejs12.x
+      Environment:
+        Variables:
+          ProductCode: !Ref ProductCode
+          AWSMarketplaceMeteringRecordsTableName: !Ref AWSMarketplaceMeteringRecordsTableName
+      Policies:
+        - DynamoDBWritePolicy:
+            TableName: !Ref AWSMarketplaceMeteringRecordsTableName
+        - Statement:
+            - Sid: AWSMarketplaceMetering
+              Effect: Allow
+              Action:
+                - aws-marketplace:BatchMeterUsage
+              Resource: "*"
+      Events:
+        MySQSEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt SQSMeteringRecrods.Arn
+            BatchSize: 1
